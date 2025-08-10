@@ -15,6 +15,30 @@ struct TocEntry {
     std::string id;
 };
 
+// Función para escapar caracteres HTML
+std::string escape_html(const std::string& content) {
+    std::string escaped;
+    escaped.reserve(content.size());
+    for (char c : content) {
+        switch (c) {
+            case '&':  escaped += "&amp;";  break;
+            case '<':  escaped += "&lt;";   break;
+            case '>':  escaped += "&gt;";   break;
+            case '"':  escaped += "&quot;"; break;
+            case '\'': escaped += "&apos;"; break;
+            case '{':  escaped += "&#123;"; break;
+            case '}':  escaped += "&#125;"; break;
+            case '[':  escaped += "&#91;"; break;
+            case ']':  escaped += "&#93;"; break;
+            case '(':  escaped += "&#40;"; break;
+            case ')':  escaped += "&#41;"; break;
+            case ';':  escaped += "&#59;"; break;
+            default:   escaped += c;        break;
+        }
+    }
+    return escaped;
+}
+
 void show_help() {
     std::cout << "Uso: m2h -m archivo.md -o salida.html\n";
     std::cout << "Convierte archivos Markdown a HTML con tabla de contenidos\n\n";
@@ -51,35 +75,25 @@ bool parse_args(int argc, char** argv, fs::path& markdown_path, fs::path& output
 
 std::string sanitize_id(const std::string& text) {
     std::string id = text;
-    
-    // Convertir a minúsculas
     std::transform(id.begin(), id.end(), id.begin(), ::tolower);
-    
-    // Reemplazar espacios con guiones
     std::replace(id.begin(), id.end(), ' ', '-');
-    
-    // Eliminar caracteres no permitidos
     id.erase(std::remove_if(id.begin(), id.end(), [](char c) {
         return !(isalnum(c) || c == '-' || c == '_');
     }), id.end());
-    
     return id;
 }
 
 std::string generate_unique_id(const std::string& base_id, std::map<std::string, int>& id_counts) {
     std::string id = sanitize_id(base_id);
-    
     if (id_counts.find(id) != id_counts.end()) {
         int count = ++id_counts[id];
         return id + "-" + std::to_string(count);
-    } else {
-        id_counts[id] = 0;
-        return id;
     }
+    id_counts[id] = 0;
+    return id;
 }
 
 std::string clean_header_text(std::string text) {
-    // Eliminar marcadores **
     size_t pos = 0;
     while ((pos = text.find("**", pos)) != std::string::npos) {
         text.erase(pos, 2);
@@ -112,9 +126,14 @@ std::string markdown_to_html(const std::string& markdown, std::vector<TocEntry>&
     std::regex inline_code_regex("`([^`]+)`");
     std::regex table_divider_regex("^\\s*\\|?[-:]+\\|[-:\\s\\|]+\\|?\\s*$");
     std::regex horizontal_rule_regex("^\\s*[-*_]{3,}\\s*$");
+    std::regex unordered_list_regex("^\\s*[-*+]\\s+(.*)");
+    std::regex ordered_list_regex("^\\s*\\d+\\.\\s+(.*)");
+    std::regex task_list_regex("^\\s*[-*+]\\s+\\[([ xX])\\]\\s+(.*)");
     
     bool in_code_block = false;
     bool in_table = false;
+    bool in_unordered_list = false;
+    bool in_ordered_list = false;
     std::string code_lang;
     std::vector<std::vector<std::string>> table_rows;
     std::map<std::string, int> id_counts;
@@ -122,35 +141,40 @@ std::string markdown_to_html(const std::string& markdown, std::vector<TocEntry>&
     while (std::getline(iss, line)) {
         std::smatch match;
         
-        // Ignorar líneas vacías
-        if (line.empty()) continue;
+        if (line.empty()) {
+            if (in_unordered_list) {
+                html += "</ul>\n";
+                in_unordered_list = false;
+            }
+            if (in_ordered_list) {
+                html += "</ol>\n";
+                in_ordered_list = false;
+            }
+            continue;
+        }
         
-        // Manejar reglas horizontales (---)
         if (std::regex_match(line, horizontal_rule_regex)) {
             html += "<hr>\n";
             continue;
         }
         
-        // Manejar bloques de código
         if (std::regex_match(line, match, code_block_regex)) {
             if (!in_code_block) {
                 in_code_block = true;
                 code_lang = match[1].str();
                 html += "<pre><code" + (code_lang.empty() ? "" : " class=\"language-" + code_lang + "\"") + ">\n";
-                continue;
             } else {
                 in_code_block = false;
                 html += "</code></pre>\n";
-                continue;
             }
-        }
-        
-        if (in_code_block) {
-            html += line + "\n";
             continue;
         }
         
-        // Manejar tablas
+        if (in_code_block) {
+            html += escape_html(line) + "\n";
+            continue;
+        }
+        
         if (std::regex_match(line, table_divider_regex)) {
             if (!in_table && !table_rows.empty()) {
                 in_table = true;
@@ -168,7 +192,7 @@ std::string markdown_to_html(const std::string& markdown, std::vector<TocEntry>&
                 
                 cell = std::regex_replace(cell, bold_regex, "<strong>$1</strong>");
                 cell = std::regex_replace(cell, italic_regex, "<em>$1</em>");
-                cell = std::regex_replace(cell, inline_code_regex, "<code>$1</code>");
+                cell = std::regex_replace(cell, inline_code_regex, "<code>" + escape_html("$1") + "</code>");
                 cell = std::regex_replace(cell, link_regex, "<a href=\"$2\">$1</a>");
                 
                 row_cells.push_back(cell);
@@ -195,7 +219,59 @@ std::string markdown_to_html(const std::string& markdown, std::vector<TocEntry>&
             in_table = false;
         }
         
-        // Manejar encabezados
+        if (std::regex_match(line, match, task_list_regex)) {
+            if (!in_unordered_list) {
+                html += "<ul class=\"task-list\">\n";
+                in_unordered_list = true;
+            }
+            std::string checked = match[1].str();
+            std::string item = match[2].str();
+            item = std::regex_replace(item, bold_regex, "<strong>$1</strong>");
+            item = std::regex_replace(item, italic_regex, "<em>$1</em>");
+            item = std::regex_replace(item, inline_code_regex, "<code>" + escape_html("$1") + "</code>");
+            item = std::regex_replace(item, link_regex, "<a href=\"$2\">$1</a>");
+            
+            std::string checked_attr = (checked == " " || checked == "x" || checked == "X") ? 
+                " checked" : "";
+            html += "<li class=\"task-list-item\"><label><input type=\"checkbox\" disabled" + 
+                   checked_attr + "> " + item + "</label></li>\n";
+            continue;
+        }
+        
+        if (std::regex_match(line, match, unordered_list_regex)) {
+            if (!in_unordered_list) {
+                html += "<ul>\n";
+                in_unordered_list = true;
+            }
+            std::string item = match[1].str();
+            item = std::regex_replace(item, bold_regex, "<strong>$1</strong>");
+            item = std::regex_replace(item, italic_regex, "<em>$1</em>");
+            item = std::regex_replace(item, inline_code_regex, "<code>" + escape_html("$1") + "</code>");
+            item = std::regex_replace(item, link_regex, "<a href=\"$2\">$1</a>");
+            html += "<li>" + item + "</li>\n";
+            continue;
+        } else if (in_unordered_list) {
+            html += "</ul>\n";
+            in_unordered_list = false;
+        }
+        
+        if (std::regex_match(line, match, ordered_list_regex)) {
+            if (!in_ordered_list) {
+                html += "<ol>\n";
+                in_ordered_list = true;
+            }
+            std::string item = match[1].str();
+            item = std::regex_replace(item, bold_regex, "<strong>$1</strong>");
+            item = std::regex_replace(item, italic_regex, "<em>$1</em>");
+            item = std::regex_replace(item, inline_code_regex, "<code>" + escape_html("$1") + "</code>");
+            item = std::regex_replace(item, link_regex, "<a href=\"$2\">$1</a>");
+            html += "<li>" + item + "</li>\n";
+            continue;
+        } else if (in_ordered_list) {
+            html += "</ol>\n";
+            in_ordered_list = false;
+        }
+        
         if (std::regex_match(line, match, h1_regex)) {
             std::string text = clean_header_text(match[1].str());
             std::string id = generate_unique_id(text, id_counts);
@@ -234,19 +310,20 @@ std::string markdown_to_html(const std::string& markdown, std::vector<TocEntry>&
             continue;
         }
         
-        // Procesar otros elementos markdown
         std::string processed_line = line;
         processed_line = std::regex_replace(processed_line, link_regex, "<a href=\"$2\">$1</a>");
         processed_line = std::regex_replace(processed_line, bold_regex, "<strong>$1</strong>");
         processed_line = std::regex_replace(processed_line, italic_regex, "<em>$1</em>");
-        processed_line = std::regex_replace(processed_line, inline_code_regex, "<code>$1</code>");
+        processed_line = std::regex_replace(processed_line, inline_code_regex, "<code>" + escape_html("$1") + "</code>");
         
         if (!processed_line.empty()) {
             html += "<p>" + processed_line + "</p>\n";
         }
     }
     
-    // Manejar tabla al final del archivo
+    if (in_unordered_list) html += "</ul>\n";
+    if (in_ordered_list) html += "</ol>\n";
+    
     if (in_table && !table_rows.empty()) {
         html += "<table>\n";
         bool first_row = true;
@@ -379,11 +456,56 @@ h4 { font-size: 1em; }
 h5 { font-size: 0.875em; }
 h6 { font-size: 0.85em; color: #6a737d; }
 
+/* List styles */
+ul, ol {
+    padding-left: 2em;
+    margin: 1em 0;
+    line-height: 1.6;
+}
+
+ul ul, ul ol, ol ul, ol ol {
+    margin: 0.5em 0;
+}
+
+li {
+    margin: 0.5em 0;
+}
+
+/* Task list styles */
+ul.task-list {
+    list-style: none;
+    padding-left: 1.5em;
+}
+
+.task-list-item {
+    position: relative;
+}
+
+.task-list-item input[type="checkbox"] {
+    margin-right: 0.5em;
+    position: absolute;
+    left: -1.5em;
+    top: 0.3em;
+}
+
+.task-list-item label {
+    display: inline-block;
+    cursor: default;
+}
+
+/* Code blocks */
 pre {
     background-color: #f6f8fa;
     border-radius: 3px;
     padding: 16px;
     overflow: auto;
+    position: relative;
+}
+
+pre code {
+    display: block;
+    overflow-x: auto;
+    padding: 1em;
 }
 
 code {
@@ -394,11 +516,7 @@ code {
     font-size: 85%;
 }
 
-pre code {
-    background-color: transparent;
-    padding: 0;
-}
-
+/* Tables */
 table {
     border-collapse: collapse;
     width: 100%;
@@ -420,6 +538,7 @@ tr:nth-child(even) {
     background-color: #f9f9f9;
 }
 
+/* Links */
 a {
     color: #0366d6;
     text-decoration: none;
@@ -429,6 +548,7 @@ a:hover {
     text-decoration: underline;
 }
 
+/* Horizontal rules */
 hr {
     border: 0;
     height: 1px;
@@ -436,6 +556,7 @@ hr {
     margin: 1.5em 0;
 }
 
+/* Responsive design */
 @media (max-width: 768px) {
     body {
         flex-direction: column;
